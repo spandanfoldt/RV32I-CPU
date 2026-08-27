@@ -1,5 +1,7 @@
 I made a simple Testbench for Maindatapath.sv.
 
+I am also attaching the timing diagram for reference.
+
 I know it isn't the best as of now as I don't intend to keep it as a final module.
 
 I will change it as per the needs as the project progresses.
