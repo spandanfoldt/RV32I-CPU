@@ -1,4 +1,4 @@
-I made a simple Testbench for Maindatapath.sv.
+I made a simple Testbench for MainDatapath.sv.
 
 I am also attaching the waveforms for reference.
 
