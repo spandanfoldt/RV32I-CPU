@@ -5,142 +5,474 @@ module MainDatapath(
     input  logic CLK,
     input  logic EN,
     input  logic Reset,
-    output logic [31:0] PC_out     // Added output for Top module
+    output logic [31:0] PC_out,
 );
 
-    // =========================
-    // INTERNAL SIGNALS
-    // =========================
-    logic [WORD_LENGTH-1:0] IF_PC, IF_Instruction;
-    logic [WORD_LENGTH-1:0] ID_PC, ID_Instruction, ID_Immediate;
-    logic [WORD_LENGTH-1:0] EX_ALUResult, EX_ReadData2, EX_ImmExt;
-    logic [WORD_LENGTH-1:0] MEM_ReadData, MEM_ALUResult;
-    logic [WORD_LENGTH-1:0] WB_WriteData;
+    //PC/Next PC
+    logic [31:0] PC_plus4;
 
-    // REGISTER FILE
-    logic [ADDRESS_PORT_WIDTH-1:0] ID_ReadReg1, ID_ReadReg2;
-    logic [WORD_LENGTH-1:0] ID_ReadData1, ID_ReadData2;
+    logic [31:0] NextPC;
 
-    // CONTROL SIGNALS
-    logic [2:0] ALUOp;
-    logic ALUSrc, MemWrite, MemToReg, RegWrite;
-    logic Branch, Jump, JumpReg;
+    logic PCWrite;
 
-    // =========================
-    // IF STAGE
-    // =========================
-    ProgramCounter PC_reg(
+    assign PC_plus4 = PC_out + 32'd4;
+
+    PC pc_inst (
         .CLK(CLK),
         .Reset(Reset),
-        .JumpReg(JumpReg),
-        .Jump(Jump),
-        .Branch(Branch),
-        .ONE(1'b1),
-        .ImmediateOutput(ID_Immediate),
-        .ReadData1(ID_ReadData1),
-        .PC(IF_PC)
+        .PCWrite(PCWrite),
+        .NextPC(NextPC),
+        .PC_out(PC_out)
     );
 
-    InstructionMemory IM(
+    //IF Stage
+    logic [31:0] IF_Instruction;
+    
+    InstructionFetch instruction_fetch (
+        .CLK(CLK),
         .EN(EN),
-        .InstructionAddress(IF_PC),
-        .ReadInstruction(IF_Instruction)
+        .Reset(Reset),
+        .PCWrite(PCWrite),
+        .NextPC(NextPC),
+    
+        .IF_Instruction(IF_Instruction),
+        .IF_PC(PC_out)
     );
 
-    // =========================
-    // ID STAGE
-    // =========================
-    ControlUnit CU(
-    .Opcode(IF_Instruction[6:0]), // matches input port
-    .ONE(1'b1),                   // tie constant 1, as required
-    .ALUOp(ALUOp),
-    .RegWrite(RegWrite),
-    .MemWrite(MemWrite),
-    .MemRead(),                    // optional, you can leave unconnected
-    .MemToReg(MemToReg),
-    .imm(),                        // optional, leave unconnected if not used
-    .Branch(Branch),
-    .Jump(Jump),
-    .JALR(JumpReg)                 // mapping JumpReg to JALR
-);
+    //branch decision logic
+    logic BranchTaken;
+    logic EX_ZeroResult;
+    logic EX_Branch;
+    logic [2:0] EX_funct3;
+    logic [31:0] EX_PC;
+    logic [31:0] EX_Immediate;
 
-    ImmediateGenerator ImmGen(
-    .instr(IF_Instruction), // matches input port
-    .imm(ID_Immediate)      // matches output port
-);
+    always_comb begin
+        BranchTaken = 1'b0;
 
-    RegisterFile RF(
-        .ReadReg1(IF_Instruction[19:15]),
-        .ReadReg2(IF_Instruction[24:20]),
-        .WriteAddress(WB_WriteData[4:0]),
+        if (EX_Branch) begin
+            case (EX_funct3)
+                3'b000: BranchTaken = EX_ZeroResult;      // BEQ
+                3'b001: BranchTaken = ~EX_ZeroResult;     // BNE
+                default: BranchTaken = 1'b0;
+            endcase
+        end
+    end
+
+    logic [31:0] BranchTarget;
+    assign BranchTarget = EX_PC + EX_Immediate;
+
+    logic EX_JALR;
+    logic [31:0] EX_ALUResult;
+    logic [31:0] JumpTarget;
+    assign JumpTarget = EX_JALR ? (EX_ALUResult & 32'hFFFFFFFE) : EX_PC + EX_Immediate;
+
+    logic EX_Jump;
+
+    always_comb begin
+        NextPC = PC_plus4;
+
+        if (BranchTaken)
+            NextPC = BranchTarget;
+        else if (EX_Jump)
+            NextPC = JumpTarget;
+    end
+
+    //IF-ID Pipeline
+    logic [31:0] ID_PC;
+    logic [31:0] ID_Instruction;
+
+    logic IF_ID_Write;
+    logic IF_ID_Flush;
+
+    assign IF_ID_Flush = BranchTaken || EX_Jump;
+
+    IF_ID_pipelineRegister if_id_reg (
         .CLK(CLK),
         .Reset(Reset),
-        .RegWrite(RegWrite),
+        .Wen(IF_ID_Write),
+        .Flush(IF_ID_Flush),
+
+        .IF_PC(PC_out),
+        .IF_Instruction(IF_Instruction),
+
+        .ID_PC(ID_PC),
+        .ID_Instruction(ID_Instruction)
+    );
+
+    logic [4:0] IF_ID_rs1;
+    logic [4:0] IF_ID_rs2;
+
+    assign IF_ID_rs1 = ID_Instruction[19:15];
+    assign IF_ID_rs2 = ID_Instruction[24:20];
+
+    //Instruction Decode
+    logic [31:0] ID_ReadData1;
+    logic [31:0] ID_ReadData2;
+    logic [31:0] ID_Immediate;
+
+    logic [4:0] ID_rs1;
+    logic [4:0] ID_rs2;
+    logic [4:0] ID_rd;
+
+    logic [2:0] ID_funct3;
+    logic [6:0] ID_funct7;
+    logic [6:0] ID_Opcode;
+
+    logic [31:0] WB_WriteData;
+    logic [4:0] WB_rd;
+    logic WB_RegWrite;
+
+    InstructionDecode decode (
+        .CLK(CLK),
+        .Reset(Reset),
+
+        .ReadInstruction(ID_Instruction),
+
+        .RegWrite(WB_RegWrite),
+        .WriteReg(WB_rd),
         .WriteData(WB_WriteData),
+
         .ReadData1(ID_ReadData1),
-        .ReadData2(ID_ReadData2)
+        .ReadData2(ID_ReadData2),
+        .ImmediateOutput(ID_Immediate),
+
+        .rs1(ID_rs1),
+        .rs2(ID_rs2),
+        .rd(ID_rd),
+
+        .func3(ID_funct3),
+        .func7(ID_funct7),
+        .Opcode(ID_Opcode)
+
     );
 
-    // Pipeline signal assignments
-    assign ID_ReadReg1 = IF_Instruction[19:15];
-    assign ID_ReadReg2 = IF_Instruction[24:20];
-    assign ID_Instruction = IF_Instruction;
-    assign ID_PC = IF_PC;
-    assign EX_ImmExt = ID_Immediate;
+    //Control Unit
+    logic [2:0] ID_ALUOp;
 
-    // =========================
-    // EX STAGE
-    // =========================
-    logic [3:0] ALUControlSig;
-    logic ALU_Zero;
+    logic ID_RegWrite;
+    logic ID_MemWrite;
+    logic ID_MemRead;
+    logic ID_MemToReg;
+    logic ID_ALUSrc;
+    logic ID_Branch;
+    logic ID_Jump;
+    logic ID_JALR;
+    logic ID_LUI;
+    logic ID_AUIPC;
+    logic ID_Link;
 
-    ALUControl ALUCtrl(
-        .ALUOp(ALUOp),
-        .func3(ID_Instruction[14:12]),
-        .func7(ID_Instruction[31:25]),
-        .ALUControlout(ALUControlSig)
+    ControlUnit control_unit (
+        .Opcode(ID_Opcode),
+
+        .ALUOp(ID_ALUOp),
+        .RegWrite(ID_RegWrite),
+        .MemWrite(ID_MemWrite),
+        .MemRead(ID_MemRead),
+        .MemToReg(ID_MemToReg),
+        .ALUSrc(ID_ALUSrc),
+
+        .Branch(ID_Branch),
+        .Jump(ID_Jump),
+        .JALR(ID_JALR),
+
+        .LUI(ID_LUI),
+        .AUIPC(ID_AUIPC),
+        .Link(ID_Link)
     );
 
-    logic [WORD_LENGTH-1:0] ALU_in1, ALU_in2;
-    assign ALU_in1 = ID_ReadData1;
-    assign ALU_in2 = (ALUSrc) ? EX_ImmExt : ID_ReadData2;
+    //ID-EX Pipeline
+    logic [31:0] EX_ReadData1;
+    logic [31:0] EX_ReadData2;
+    logic [31:0] EX_Instruction;
 
-    ALU ALUUnit(
-        .operandA(ALU_in1),
-        .operandB(ALU_in2),
-        .ALUControl(ALUControlSig),
-        .Result(EX_ALUResult),
-        .Zero(ALU_Zero)
-    );
+    logic [4:0] EX_rs1;
+    logic [4:0] EX_rs2;
+    logic [4:0] EX_rd;
 
-    assign EX_ReadData2 = ID_ReadData2;
-    assign MEM_ALUResult = EX_ALUResult;
+    logic [6:0] EX_funct7;
 
-    // =========================
-    // MEM STAGE
-    // =========================
-    DataMemory DM(
+    logic [2:0] EX_ALUOp;
+
+    logic EX_RegWrite;
+    logic EX_MemWrite;
+    logic EX_MemRead;
+    logic EX_MemToReg;
+    logic EX_ALUSrc;
+    //logic EX_JALR;
+    logic EX_LUI;
+    logic EX_AUIPC;
+    logic EX_Link;
+    logic Stall;
+    logic ID_EX_Flush;
+
+    assign ID_EX_Flush = Stall || BranchTaken || EX_Jump;
+
+    ID_EX_pipelineRegister id_ex_reg (
+
         .CLK(CLK),
-        .MemWrite(MemWrite),
-        .MemRead(1'b1),
-        .Address(EX_ALUResult),
-        .WriteData(EX_ReadData2),
-        .ReadData(MEM_ReadData),
-        .mask_bits(4'b1111)
+        .Reset(Reset),
+        .Flush(ID_EX_Flush),
+
+        .ID_PC(ID_PC),
+        .ID_ReadData1(ID_ReadData1),
+        .ID_ReadData2(ID_ReadData2),
+        .ID_Immediate(ID_Immediate),
+        .ID_Instruction(ID_Instruction),
+
+        .ID_rs1(ID_rs1),
+        .ID_rs2(ID_rs2),
+        .ID_rd(ID_rd),
+
+        .ID_funct3(ID_funct3),
+        .ID_funct7(ID_funct7),
+
+        .ID_ALUOp(ID_ALUOp),
+        .ID_RegWrite(ID_RegWrite),
+        .ID_MemWrite(ID_MemWrite),
+        .ID_MemRead(ID_MemRead),
+        .ID_MemToReg(ID_MemToReg),
+        .ID_ALUSrc(ID_ALUSrc),
+        .ID_Branch(ID_Branch),
+        .ID_Jump(ID_Jump),
+        .ID_JALR(ID_JALR),
+        .ID_LUI(ID_LUI),
+        .ID_AUIPC(ID_AUIPC),
+        .ID_Link(ID_Link),
+
+        .EX_PC(EX_PC),
+        .EX_ReadData1(EX_ReadData1),
+        .EX_ReadData2(EX_ReadData2),
+        .EX_Immediate(EX_Immediate),
+        .EX_Instruction(EX_Instruction),
+
+        .EX_rs1(EX_rs1),
+        .EX_rs2(EX_rs2),
+        .EX_rd(EX_rd),
+
+        .EX_funct3(EX_funct3),
+        .EX_funct7(EX_funct7),
+
+        .EX_ALUOp(EX_ALUOp),
+        .EX_RegWrite(EX_RegWrite),
+        .EX_MemWrite(EX_MemWrite),
+        .EX_MemRead(EX_MemRead),
+        .EX_MemToReg(EX_MemToReg),
+        .EX_ALUSrc(EX_ALUSrc),
+        .EX_Branch(EX_Branch),
+        .EX_Jump(EX_Jump),
+        .EX_JALR(EX_JALR),
+        .EX_LUI(EX_LUI),
+        .EX_AUIPC(EX_AUIPC),
+        .EX_Link(EX_Link)
     );
 
-    // =========================
-    // WB STAGE
-    // =========================
-    WriteBack WB(
+    //EX Stage
+    logic [3:0] EX_ALUControl;
+    //logic [31:0] EX_ALUResult;
+    logic [31:0] EX_WriteData;
+    logic [31:0] EX_AUIPCResult;
+    logic [31:0] MEM_WriteData;
+    logic [31:0] MEM_ALUResult;
+    logic [31:0] EX_LUIResult;
+    
+    assign EX_LUIResult = EX_Immediate;
+
+    ALUControl alu_control (
+        .ALUOp(EX_ALUOp),
+        .funct3(EX_funct3),
+        .funct7(EX_funct7),
+        .ALUControl(EX_ALUControl)
+    );
+
+    logic [1:0] ForwardA;
+    logic [1:0] ForwardB;
+
+    logic [4:0] MEM_rd;
+    logic MEM_RegWrite;
+
+    ForwardingUnit forwarding_unit (
+        .ID_EX_rs1(EX_rs1),
+        .ID_EX_rs2(EX_rs2),
+
+        .EX_MEM_rd(MEM_rd),
+        .EX_MEM_RegWrite(MEM_RegWrite),
+
+        .MEM_WB_rd(WB_rd),
+        .MEM_WB_RegWrite(WB_RegWrite),
+
+        .ForwardA(ForwardA),
+        .ForwardB(ForwardB)
+    );
+
+    Execute execute (
+        .ReadData1(EX_ReadData1),
+        .ReadData2(EX_ReadData2),
+        .ImmExt(EX_Immediate),
+        .PC(EX_PC),
+
+        .ALUControl(EX_ALUControl),
+        .ALUSrc(EX_ALUSrc),
+
+        .ForwardA(ForwardA),
+        .ForwardB(ForwardB),
+
+        .EX_MEM_ALUResult(MEM_ALUResult),
+        .MEM_WB_WriteData(WB_WriteData),
+
+        .ALUResult(EX_ALUResult),
+        .WriteData(EX_WriteData),
+        .AUIPC_result(EX_AUIPCResult),
+        .ZeroResult(EX_ZeroResult)
+    );
+
+    // EX-MEM Pipeline
+    logic [31:0] MEM_PC;
+    logic [31:0] MEM_AUIPCResult;
+    logic [31:0] MEM_Instruction;
+
+    logic MEM_MemWrite;
+    logic MEM_MemRead;
+    logic MEM_MemToReg;
+    logic MEM_LUI;
+    logic MEM_AUIPC;
+    logic MEM_Link;
+    logic [31:0] MEM_LUIResult;
+
+    EX_MEM_pipelineRegister ex_mem_reg (
+
         .CLK(CLK),
-        .MemToReg(MemToReg),
-        .ReadData(MEM_ReadData),
-        .ALUResult(MEM_ALUResult),
-        .WriteData(WB_WriteData)
+        .Reset(Reset),
+        .Flush(1'b0),
+
+        .EX_PC(EX_PC),
+        .EX_ALUResult(EX_ALUResult),
+        .EX_WriteData(EX_WriteData),
+        .EX_AUIPCResult(EX_AUIPCResult),
+        .EX_Instruction(EX_Instruction),
+        .EX_LUIResult(EX_LUIResult),
+
+        .EX_rd(EX_rd),
+
+        .EX_RegWrite(EX_RegWrite),
+        .EX_MemWrite(EX_MemWrite),
+        .EX_MemRead(EX_MemRead),
+        .EX_MemToReg(EX_MemToReg),
+        .EX_LUI(EX_LUI),
+        .EX_AUIPC(EX_AUIPC),
+        .EX_Link(EX_Link),
+
+        .MEM_PC(MEM_PC),
+        .MEM_ALUResult(MEM_ALUResult),
+        .MEM_WriteData(MEM_WriteData),
+        .MEM_AUIPCResult(MEM_AUIPCResult),
+        .MEM_Instruction(MEM_Instruction),
+        .MEM_LUIResult(MEM_LUIResult),
+
+        .MEM_rd(MEM_rd),
+
+        .MEM_RegWrite(MEM_RegWrite),
+        .MEM_MemWrite(MEM_MemWrite),
+        .MEM_MemRead(MEM_MemRead),
+        .MEM_MemToReg(MEM_MemToReg),
+        .MEM_LUI(MEM_LUI),
+        .MEM_AUIPC(MEM_AUIPC),
+        .MEM_Link(MEM_Link)
     );
 
-    // Output PC to Top
-    assign PC_out = IF_PC;
+    //Data Memory
+    logic [31:0] MEM_ReadData;
+
+    DataMemory data_memory (
+        .CLK(CLK),
+        .EN(EN),
+
+        .MemWrite(MEM_MemWrite),
+        .MemRead(MEM_MemRead),
+
+        .Address(MEM_ALUResult[11:2]),
+        .WriteData(MEM_WriteData),
+
+        .ReadData(MEM_ReadData)
+    );
+
+    //MEM-WB Pipeline
+    logic [31:0] WB_PC;
+    logic [31:0] WB_ALUResult;
+    logic [31:0] WB_ReadData;
+    logic [31:0] WB_AUIPCResult;
+    logic [31:0] WB_LUIResult;
+    logic [31:0] WB_Instruction;
+
+    logic WB_MemToReg;
+    logic WB_LUI;
+    logic WB_AUIPC;
+    logic WB_Link;
+
+    MEM_WB_PipelineRegister mem_wb_reg (
+
+        .CLK(CLK),
+        .Reset(Reset),
+
+        .MEM_PC(MEM_PC),
+        .MEM_ALUResult(MEM_ALUResult),
+        .MEM_ReadData(MEM_ReadData),
+        .MEM_AUIPCResult(MEM_AUIPCResult),
+        .MEM_LUIResult(MEM_LUIResult),
+        .MEM_Instruction(MEM_Instruction),
+
+        .MEM_rd(MEM_rd),
+
+        .MEM_RegWrite(MEM_RegWrite),
+        .MEM_MemToReg(MEM_MemToReg),
+        .MEM_LUI(MEM_LUI),
+        .MEM_AUIPC(MEM_AUIPC),
+        .MEM_Link(MEM_Link),
+
+        .WB_PC(WB_PC),
+        .WB_ALUResult(WB_ALUResult),
+        .WB_ReadData(WB_ReadData),
+        .WB_AUIPCResult(WB_AUIPCResult),
+        .WB_LUIResult(WB_LUIResult),
+        .WB_Instruction(WB_Instruction),
+
+        .WB_rd(WB_rd),
+
+        .WB_RegWrite(WB_RegWrite),
+        .WB_MemToReg(WB_MemToReg),
+        .WB_LUI(WB_LUI),
+        .WB_AUIPC(WB_AUIPC),
+        .WB_Link(WB_Link)
+    );
+
+    //Write Back
+    WriteBack writeback (
+        .WB_PC(WB_PC),
+        .WB_ALUResult(WB_ALUResult),
+        .WB_ReadData(WB_ReadData),
+        .WB_LUIResult(WB_LUIResult),
+        .WB_AUIPCResult(WB_AUIPCResult),
+
+        .WB_MemToReg(WB_MemToReg),
+        .WB_LUI(WB_LUI),
+        .WB_AUIPC(WB_AUIPC),
+        .WB_Link(WB_Link),
+
+        .WB_WriteData(WB_WriteData)
+    );
+
+    //Hazard Detection
+
+    HazardDetectionUnit hazard_unit (
+        .ID_EX_MemRead(EX_MemRead),
+        .ID_EX_rd(EX_rd),
+
+        .IF_ID_rs1(IF_ID_rs1),
+        .IF_ID_rs2(IF_ID_rs2),
+
+        .PCWrite(PCWrite),
+        .IF_ID_Write(IF_ID_Write),
+        .Stall(Stall)
+    );
 
 endmodule
