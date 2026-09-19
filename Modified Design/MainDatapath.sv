@@ -25,11 +25,11 @@ module MainDatapath(
         .NextPC(NextPC),
     
         .IF_Instruction(IF_Instruction),
-        .IF_PC(PC_out)
+        .IF_PC(IF_PC)
     );
     
     assign PC_out = IF_PC;
-    assign PC_plus4 = IF_PC + 32'd4;
+    assign PC_plus4 = PC_out + 32'd4;
     
     
     //branch decision logic
