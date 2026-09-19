@@ -8,25 +8,14 @@ module MainDatapath(
     output logic [31:0] PC_out,
 );
 
-    //PC/Next PC
-    logic [31:0] PC_plus4;
 
-    logic [31:0] NextPC;
-
-    logic PCWrite;
-
-    assign PC_plus4 = PC_out + 32'd4;
-
-    PC pc_inst (
-        .CLK(CLK),
-        .Reset(Reset),
-        .PCWrite(PCWrite),
-        .NextPC(NextPC),
-        .PC_out(PC_out)
-    );
 
     //IF Stage
     logic [31:0] IF_Instruction;
+    logic [31:0] IF_PC;
+    logic [31:0] PC_plus4;
+    logic [31:0] NextPC;
+    logic PCWrite;
     
     InstructionFetch instruction_fetch (
         .CLK(CLK),
@@ -38,7 +27,11 @@ module MainDatapath(
         .IF_Instruction(IF_Instruction),
         .IF_PC(PC_out)
     );
-
+    
+    assign PC_out = IF_PC;
+    assign PC_plus4 = IF_PC + 32'd4;
+    
+    
     //branch decision logic
     logic BranchTaken;
     logic EX_ZeroResult;
@@ -93,7 +86,7 @@ module MainDatapath(
         .Wen(IF_ID_Write),
         .Flush(IF_ID_Flush),
 
-        .IF_PC(PC_out),
+        .IF_PC(IF_PC),
         .IF_Instruction(IF_Instruction),
 
         .ID_PC(ID_PC),
